@@ -36,6 +36,10 @@ $ apptainer run --pid --no-init --writable-tmpfs \
   the image's, because aiida-core is `pip --user` installed into
   `/home/aiida/.local`.
 
+Any host user id works; the container does not switch users. The base image is
+pinned by digest, so a rebuild always produces the same contents — see
+[docs/warnings.md](docs/warnings.md) for how to bump it.
+
 State lives in `data/container/home` (git-ignored); set `AIIDA_DATA_HOME` to
 use another directory.
 

@@ -19,7 +19,18 @@ Apptainer shares the host network namespace, so every service in the
 container binds host ports.
 
 - **PostgreSQL** was moved to **5433** (`PGPORT`, override with
-  `AIIDA_POSTGRES_PORT`) to avoid clashing with a host instance.
+  `AIIDA_POSTGRES_PORT`) to avoid clashing with a host instance. If something
+  else already holds that port, the container does not fall back to it
+  silently: the readiness check asks the server on `localhost:${PGPORT}`
+  which data directory it serves and refuses anything that is not the
+  bundled cluster, so the boot ends with
+
+  ```text
+  another server answered there, serving /var/lib/postgres/data; refusing to use it
+  ```
+
+  and no AiiDA profile is created. Point `AIIDA_POSTGRES_PORT` at a free
+  port and start over with an empty data directory.
 - **RabbitMQ** still uses the defaults **5672** (AMQP), **25672** (Erlang
   distribution) and **4369** (epmd). On a host that already runs a broker
   this is a hard failure, not a warning. Remapping it means setting
@@ -59,6 +70,16 @@ hide `verdi` entirely. `~/.erlang.cookie` therefore lives in the writable
 tmpfs and is regenerated on every start, which is fine for a single-node
 broker.
 
+## Host user id
+
+Apptainer ignores the image's `USER` and runs everything as the invoking host
+user, but the image ships `/home/aiida` as mode `2770` owned by `1000:1000`,
+and `HOME` points there. Any other uid/gid could not even traverse it, so the
+definition relaxes that one directory to `0777` at build time — it is the only
+path in the image that is not world-readable, and the image is read-only at
+runtime anyway. The bundled services do not use `s6-setuidgid`, so no uid
+switch is involved and any host user works.
+
 `run.sh` takes a `flock` on `$AIIDA_DATA_HOME/.lock`; two containers sharing
 one data directory would corrupt the PostgreSQL cluster and the mnesia store.
 
@@ -66,6 +87,20 @@ one data directory would corrupt the PostgreSQL cluster and the mnesia store.
 
 `containerfiles/aiida.def` rewrites lines of the upstream init scripts with
 `sed`. A `sed` that matches nothing exits 0, so each patch is followed by an
-assertion that fails the build. The base image is pinned to
-`aiida-2.9.0` rather than `latest` for the same reason — bumping the tag may
-require re-checking the patches.
+assertion that fails the build.
+
+For the same reason the base image is pinned by **digest**, not by tag: a tag
+— even a version tag — can be repushed, and the patched lines would move under
+a definition file that has not changed. To move to a newer aiida-core, resolve
+the tag yourself and paste the digest into `From:`:
+
+```console
+$ TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:aiidateam/aiida-core-with-services:pull" | jq -r .token)
+$ curl -sI -H "Authorization: Bearer $TOKEN" \
+      -H "Accept: application/vnd.oci.image.index.v1+json" \
+      https://registry-1.docker.io/v2/aiidateam/aiida-core-with-services/manifests/<tag> |
+  grep -i docker-content-digest
+```
+
+Then rebuild and re-check every patch: the assertions catch a `sed` that no
+longer matches, but not one that matches the wrong thing.

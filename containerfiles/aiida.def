@@ -1,7 +1,10 @@
 Bootstrap: docker
-# Pinned: `latest` moves with every aiida-core release and the %post patches
-# below rewrite specific lines of the image's init scripts.
-From: aiidateam/aiida-core-with-services:aiida-2.9.0
+# Pinned by digest, not by tag: `latest` moves with every aiida-core release,
+# and even a version tag can be repushed, while the %post patches below
+# rewrite specific lines of the image's init scripts.  To bump, resolve the
+# new tag to a digest first (see docs/warnings.md) and re-check every patch.
+# aiidateam/aiida-core-with-services:aiida-2.9.0 as of 2026-08-24
+From: aiidateam/aiida-core-with-services@sha256:37c129aaba7e9347b0982746e8477fd8daf1006e8b865c74c5b5dce2057a1ced
 
 %labels
     Description AiiDA 2.9.0 with PostgreSQL and RabbitMQ services
@@ -43,16 +46,37 @@ From: aiidateam/aiida-core-with-services:aiida-2.9.0
     # The stock postgresql-prepare.sh polls bare `pg_isready`, which without
     # an explicit port targets 5432 and therefore never succeeds once the
     # server has been moved.  s6-rc then waits on this oneshot forever and
-    # the container hangs before ever reaching CMD.  Poll the right port and
-    # give up loudly instead of spinning.
+    # the container hangs before ever reaching CMD.
+    #
+    # "Something answers on the port" is the wrong question anyway: Apptainer
+    # shares the host network namespace, so an unrelated server can answer --
+    # and if it does, ours could not bind the port and AiiDA would silently
+    # be initialised against the foreign database.  `pg_ctl status` is not
+    # enough either (initdb's own single-user backend writes postmaster.pid,
+    # so it reports "running" while the cluster is still being created).
+    #
+    # Ask the server on the wire instead, over exactly the host/port that
+    # aiida-prepare.sh hands to `verdi presto`, and accept it only if it is
+    # serving our data directory.
     cat > /etc/init/postgresql-prepare.sh <<'EOF'
 #!/bin/bash
+PGDATA_DIR=/home/aiida/.postgresql
+HOST="${AIIDA_POSTGRES_HOSTNAME:-localhost}"
 PORT="${PGPORT:-5433}"
+
 for _ in $(seq 1 120); do
-  pg_isready --quiet --port "${PORT}" && exit 0
+  served=$(psql -h "${HOST}" -p "${PORT}" -d postgres -Atqc 'SHOW data_directory' 2>/dev/null)
+  [ "${served}" = "${PGDATA_DIR}" ] && exit 0
   sleep 1
 done
-echo "PostgreSQL did not become ready on port ${PORT} after 120s" >&2
+
+echo "the bundled PostgreSQL did not become ready on ${HOST}:${PORT} after 120s" >&2
+if [ -n "${served}" ]; then
+  echo "another server answered there, serving ${served}; refusing to use it" >&2
+elif [ -f "${PGDATA_DIR}/logfile" ]; then
+  echo "last lines of ${PGDATA_DIR}/logfile:" >&2
+  tail -n 20 "${PGDATA_DIR}/logfile" >&2
+fi
 exit 1
 EOF
     chmod +x /etc/init/postgresql-prepare.sh
@@ -80,6 +104,25 @@ rabbitmq-diagnostics -q -t 5 check_running || exit 1
 exit 0
 EOF
     chmod +x /etc/s6-overlay/s6-rc.d/rabbitmq/data/check
+
+    # ------------------------------------------------------------------ #
+    # Home directory permissions                                          #
+    # ------------------------------------------------------------------ #
+    # Apptainer ignores the image's USER and runs as the invoking host user,
+    # but the image ships /home/aiida as 2770 owned by 1000:1000, so anyone
+    # with a different uid/gid cannot even traverse it -- and HOME points
+    # there.  It is the only path in the image that is not world-readable,
+    # so one chmod is enough.  Write access is needed too: rabbitmq-init
+    # creates ~/.erlang.cookie here.  The setgid bit goes away on purpose:
+    # inheriting gid 1000 fails for a user whose namespace does not map it.
+    # The image stays read-only at runtime; writes land in the tmpfs overlay.
+    # Symbolic, not octal: GNU chmod keeps a directory's setuid/setgid bits
+    # for an octal mode, and this one has both (fix-permissions sets +6000).
+    chmod a+rwx,u-s,g-s /home/aiida
+    [ "$(stat -c %a /home/aiida)" = "777" ] || {
+        echo "PATCH FAILED: /home/aiida is $(stat -c %a /home/aiida), not 777" >&2
+        exit 1
+    }
 
 %environment
     # Apptainer overrides HOME with the host user's home; the image installs

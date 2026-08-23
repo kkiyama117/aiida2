@@ -24,14 +24,18 @@ fi
 mkdir -p "$DATA/.aiida" "$DATA/.postgresql" "$DATA/.rabbitmq" "$DATA/aiida_run"
 
 # One container per data directory; two would corrupt the PostgreSQL cluster
-# and the RabbitMQ mnesia store.
-if command -v flock > /dev/null 2>&1; then
-    exec 9> "$DATA/.lock"
-    flock -n 9 || {
-        echo "another container is already using $DATA" >&2
-        exit 1
-    }
+# and the RabbitMQ mnesia store.  This is a data-safety guard, so a missing
+# flock is a hard error rather than a silently skipped lock.
+if ! command -v flock > /dev/null 2>&1; then
+    echo "flock not found; it is required to keep two containers from" >&2
+    echo "sharing $DATA.  Install it (util-linux) and try again." >&2
+    exit 1
 fi
+exec 9> "$DATA/.lock"
+flock -n 9 || {
+    echo "another container is already using $DATA" >&2
+    exit 1
+}
 
 exec apptainer run --pid --no-init --writable-tmpfs \
     -B "$DATA/.aiida":/home/aiida/.aiida \
