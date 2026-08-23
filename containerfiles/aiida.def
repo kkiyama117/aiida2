@@ -1,0 +1,118 @@
+Bootstrap: docker
+# Pinned: `latest` moves with every aiida-core release and the %post patches
+# below rewrite specific lines of the image's init scripts.
+From: aiidateam/aiida-core-with-services:aiida-2.9.0
+
+%labels
+    Description AiiDA 2.9.0 with PostgreSQL and RabbitMQ services
+    Documentation https://aiida.readthedocs.io/projects/aiida-core/en/latest/installation/docker.html
+
+%post
+    # A `sed` that matches nothing still exits 0, which would ship a silently
+    # unpatched image -- the failure would only show up much later as a port
+    # clash or a hang.  Assert the result of every patch instead.
+    assert() {
+        grep -qF -e "$2" -- "$1" || {
+            echo "PATCH FAILED: expected '$2' in $1" >&2
+            exit 1
+        }
+    }
+
+    # ------------------------------------------------------------------ #
+    # PostgreSQL: run on ${PGPORT} instead of 5432                        #
+    # ------------------------------------------------------------------ #
+    # Apptainer shares the host network namespace, so the container's
+    # PostgreSQL would clash with a host instance on the default port.
+    # Every consumer is switched to ${PGPORT} (see %environment); the
+    # `:-5433` fallbacks keep the scripts correct even if the variable does
+    # not make it into the s6 container environment.
+    sed -i 's|^   echo "unix_socket_directories = .*$|&\n   echo "port = ${PGPORT:-5433}" >> /home/${SYSTEM_USER}/.postgresql/postgresql.conf|' /etc/init/postgresql-init.sh
+    assert /etc/init/postgresql-init.sh 'echo "port = ${PGPORT:-5433}"'
+
+    sed -i 's|--postgres-password "${AIIDA_POSTGRES_PASSWORD:-password}"|& \\\n        --postgres-port "${PGPORT:-5433}"|' /etc/init/aiida-prepare.sh
+    assert /etc/init/aiida-prepare.sh '--postgres-port "${PGPORT:-5433}"'
+
+    # The stock check is `[ ! -d ~/.postgresql ]`, but run.sh bind-mounts
+    # that directory, so it always exists and `initdb` would never run.  Key
+    # the check on the cluster marker file instead.
+    sed -i 's|^if \[ ! -d /home/${SYSTEM_USER}/.postgresql \]; then$|if [ ! -f /home/${SYSTEM_USER}/.postgresql/PG_VERSION ]; then|' /etc/init/postgresql-init.sh
+    sed -i 's|^   mkdir /home/${SYSTEM_USER}/.postgresql$|   mkdir -p /home/${SYSTEM_USER}/.postgresql|' /etc/init/postgresql-init.sh
+    assert /etc/init/postgresql-init.sh 'if [ ! -f /home/${SYSTEM_USER}/.postgresql/PG_VERSION ]; then'
+    assert /etc/init/postgresql-init.sh 'mkdir -p /home/${SYSTEM_USER}/.postgresql'
+
+    # The stock postgresql-prepare.sh polls bare `pg_isready`, which without
+    # an explicit port targets 5432 and therefore never succeeds once the
+    # server has been moved.  s6-rc then waits on this oneshot forever and
+    # the container hangs before ever reaching CMD.  Poll the right port and
+    # give up loudly instead of spinning.
+    cat > /etc/init/postgresql-prepare.sh <<'EOF'
+#!/bin/bash
+PORT="${PGPORT:-5433}"
+for _ in $(seq 1 120); do
+  pg_isready --quiet --port "${PORT}" && exit 0
+  sleep 1
+done
+echo "PostgreSQL did not become ready on port ${PORT} after 120s" >&2
+exit 1
+EOF
+    chmod +x /etc/init/postgresql-prepare.sh
+
+    # ------------------------------------------------------------------ #
+    # RabbitMQ                                                            #
+    # ------------------------------------------------------------------ #
+    # rabbitmq-server runs the Erlang VM with `-B i`, i.e. SIGINT is
+    # ignored, so the stock down-signal never stops the broker: the beam
+    # process survives the container and keeps holding port 25672.  SIGTERM
+    # is handled by OTP's signal server, and timeout-kill is the backstop.
+    echo SIGTERM > /etc/s6-overlay/s6-rc.d/rabbitmq/down-signal
+    echo 20000 > /etc/s6-overlay/s6-rc.d/rabbitmq/timeout-kill
+    # A `down` file only means "start this service down" and is not a stop
+    # hook for a longrun -- make sure no earlier attempt left one behind.
+    rm -f /etc/s6-overlay/s6-rc.d/rabbitmq/down
+
+    # The readiness probe is invoked 500 ms after launch, long before the
+    # node exists, and rabbitmq-diagnostics then blocks for its default 60 s
+    # timeout.  Bounding each probe at 5 s lets the poll loop actually poll.
+    cat > /etc/s6-overlay/s6-rc.d/rabbitmq/data/check <<'EOF'
+#!/bin/bash
+rabbitmq-diagnostics -q -t 5 ping || exit 1
+rabbitmq-diagnostics -q -t 5 check_running || exit 1
+exit 0
+EOF
+    chmod +x /etc/s6-overlay/s6-rc.d/rabbitmq/data/check
+
+%environment
+    # Apptainer overrides HOME with the host user's home; the image installs
+    # aiida-core with `pip --user` into /home/aiida/.local, so restore it.
+    export HOME=/home/aiida
+    # s6-overlay resets the environment for the supervision tree by default;
+    # keep it so HOME and PGPORT reach the services and the CMD.
+    export S6_KEEP_ENV=1
+    # Fail after 10 minutes instead of the image default of "wait forever"
+    # if a service never comes up.
+    export S6_CMD_WAIT_FOR_SERVICES_MAXTIME=600000
+    # Client-side default port for psql/pg_isready/verdi, matching the
+    # server port written into postgresql.conf on first init.
+    export PGPORT="${AIIDA_POSTGRES_PORT:-5433}"
+    # fix-permissions chgrp's to ${SYSTEM_GID} (100 in the image).  Only the
+    # invoking user's gid is mapped inside Apptainer's user namespace, so
+    # anything else fails with EINVAL; use the real gid.  Evaluated when this
+    # script is sourced at runtime, which is what we want.
+    export SYSTEM_GID="$(id -g)"
+
+%runscript
+    # `apptainer run aiida.sif` -> services up + interactive bash
+    if [ $# -eq 0 ]; then set bash; fi
+    exec /init "$@"
+
+# No %startscript: `apptainer instance start` always keeps its own process as
+# PID 1, so s6-overlay-suexec aborts with "can only run as pid 1" even with
+# --no-init.  This image only works as a foreground session (see run.sh).
+
+%help
+    AiiDA 2.9.0 with bundled PostgreSQL and RabbitMQ.
+
+    The image is supervised by s6-overlay, which must be PID 1 and needs a
+    writable /run, and only the state directories may be bind-mounted --
+    aiida-core itself lives in the image's /home/aiida/.local.  Use ./run.sh,
+    which wraps all of that.
