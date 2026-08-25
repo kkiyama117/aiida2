@@ -10,6 +10,13 @@ From: aiidateam/aiida-core-with-services@sha256:37c129aaba7e9347b0982746e8477fd8
     Description AiiDA 2.9.0 with PostgreSQL and RabbitMQ services
     Documentation https://aiida.readthedocs.io/projects/aiida-core/en/latest/installation/docker.html
 
+%files
+    # Local scheduler plugins.  They are baked into the image rather than
+    # installed at runtime: /home/aiida/.local belongs to the image and is
+    # read-only, so a runtime `pip install --user` would land in the
+    # --writable-tmpfs overlay and vanish with the session.
+    aiida_plugins/aiida-slurm-rsc /opt/aiida_plugins/aiida-slurm-rsc
+
 %post
     # A `sed` that matches nothing still exits 0, which would ship a silently
     # unpatched image -- the failure would only show up much later as a port
@@ -122,6 +129,27 @@ EOF
         echo "PATCH FAILED: /home/aiida is $(stat -c %a /home/aiida), not 777" >&2
         exit 1
     }
+
+    # ------------------------------------------------------------------ #
+    # Local scheduler plugins                                             #
+    # ------------------------------------------------------------------ #
+    # aiida-core is `pip --user` installed into /home/aiida/.local, so the
+    # plugins have to go to the same user site or `verdi` will not see them.
+    # HOME is set explicitly because %post runs as root: it makes pip pick
+    # exactly the site directory that the runtime HOME resolves to.
+    # --no-deps: aiida-core is already present and must not be resolved
+    # again; --no-build-isolation: setuptools and wheel ship with the image,
+    # so the build needs no network.
+    HOME=/home/aiida pip install --user --no-deps --no-build-isolation \
+        --no-cache-dir /opt/aiida_plugins/aiida-slurm-rsc
+
+    # An entry point that is not registered only shows up much later, as
+    # `verdi computer setup` rejecting the scheduler name.  Check it here.
+    HOME=/home/aiida python3 - <<'EOF'
+from importlib.metadata import entry_points
+names = sorted(e.name for e in entry_points(group="aiida.schedulers"))
+assert "slurm_rsc" in names, f"PATCH FAILED: aiida.schedulers = {names}"
+EOF
 
 %environment
     export HOME=/home/aiida

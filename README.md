@@ -3,14 +3,38 @@
 AiiDA 2.9.0 + PostgreSQL + RabbitMQ in a single Apptainer container, built
 from the official `aiidateam/aiida-core-with-services` image.
 
-The calculation layer (KUDPC `sp` Slurm plugin, QE/Gaussian workflows) is
-not in the tree yet — what is here is a working service container.
+The calculation layer is arriving: `aiida_plugins/aiida-slurm-rsc` (the
+KUDPC `sp` scheduler) is in the tree and baked into the image. The QE and
+Gaussian workflows are not.
 
 ## Build
 
 ```console
 $ apptainer build --fakeroot containerfiles/aiida.sif containerfiles/aiida.def
 ```
+
+## Plugins
+
+`aiida_plugins/` holds the AiiDA plugins this project ships. They are
+installed **at build time**, into the same `pip --user` site as aiida-core
+(`/home/aiida/.local`): that directory belongs to the image, so a runtime
+`pip install` would land in the `--writable-tmpfs` overlay and disappear with
+the session. Editing a plugin therefore means rebuilding the image.
+
+| plugin | entry point | what it does |
+| --- | --- | --- |
+| `aiida-slurm-rsc` | `slurm_rsc` (`aiida.schedulers`) | Slurm scheduler for KUDPC Camphor (`sp`). The cluster forbids `--nodes`, `--ntasks*`, `--cpus-per-task`, `--mem` and `--qos` and wants `#SBATCH --rsc p=N:t=N:c=N:m=NG` instead, so the plugin subclasses `SlurmScheduler` and reimplements only the submit-script header; `squeue`/`sacct` parsing is inherited. |
+
+```console
+$ ./run.py attach verdi plugin list aiida.schedulers        # slurm_rsc is listed
+$ ./run.py attach python3 /opt/aiida_plugins/aiida-slurm-rsc/tests/test_scheduler.py
+```
+
+A computer picks it up at setup time — `verdi computer setup --scheduler
+slurm_rsc` — and nothing else changes: calculations keep declaring ordinary
+AiiDA `resources`, and the plugin maps
+`num_machines`/`num_mpiprocs_per_machine × num_cores_per_mpiproc`/
+`max_memory_kb` onto `p`/`t`=`c`/`m` (memory rounded up to whole GiB).
 
 ## Run
 
