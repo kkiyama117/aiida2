@@ -14,12 +14,32 @@ $ apptainer build --fakeroot containerfiles/aiida.sif containerfiles/aiida.def
 
 ## Run
 
+`run.py` wraps the flags the image needs. It is plain Python 3, standard
+library only.
+
 ```console
-$ ./run.sh              # services up + interactive bash
-$ ./run.sh verdi status
+$ ./run.py                      # services up + interactive bash (foreground)
+$ ./run.py verdi status         # services up, one command, then down
+$ ./run.py up                   # same session, in the background
+$ ./run.py attach               # shell alongside a running container
+$ ./run.py attach verdi status  # ... or one command in it
+$ ./run.py status               # is a container running?
+$ ./run.py down                 # stop the background container
 ```
 
-`run.sh` wraps the flags the image needs:
+`up` starts the very same foreground session with `sleep infinity` as its
+command, detached from your terminal, and waits until s6 reports every
+service up. `down` sends it a `SIGTERM`, which s6 turns into an ordered
+shutdown.
+
+`attach` opens a *second* container with `apptainer exec`, which skips the
+runscript: no s6, no services, nothing started or stopped. It reaches the
+running container's PostgreSQL and RabbitMQ because Apptainer shares the host
+network namespace, and its `.aiida` directory because that is bind-mounted.
+It is a separate PID and mount namespace, though — see
+[docs/warnings.md](docs/warnings.md).
+
+Underneath, a session is:
 
 ```console
 $ apptainer run --pid --no-init --writable-tmpfs \
@@ -41,14 +61,16 @@ pinned by digest, so a rebuild always produces the same contents — see
 [docs/warnings.md](docs/warnings.md) for how to bump it.
 
 State lives in `data/container/home` (git-ignored); set `AIIDA_DATA_HOME` to
-use another directory.
+use another directory. One container per data directory: `run.py` holds an
+`flock` on `<data>/.lock` for as long as the session lives.
 
 ## Limitations
 
 - **It is a session, not a service.** When the command exits, s6 stops the
-  AiiDA daemon, PostgreSQL and RabbitMQ. Long-running workflows do not
-  survive logout. `apptainer instance start` does not help — s6-overlay
-  cannot be PID 1 in an instance.
+  AiiDA daemon, PostgreSQL and RabbitMQ. `./run.py up` keeps that session
+  alive in the background, but it is still an ordinary process: it dies with
+  the machine and nothing restarts it. `apptainer instance start` is not an
+  option — s6-overlay cannot be PID 1 in an instance.
 - **RabbitMQ uses the default ports** (5672 / 25672 / 4369) on the host
   network namespace. It will fail on a machine that already runs a broker.
   PostgreSQL was moved to 5433; RabbitMQ was not.

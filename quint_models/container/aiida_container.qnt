@@ -1,15 +1,30 @@
-// Lifecycle model for run.sh and containerfiles/aiida.def.
+// Lifecycle model for run.py and containerfiles/aiida.def.
 //
 // Covers image patch validation, the single-data-directory lock, dependency
-// readiness, the foreground command lifetime, and supervised shutdown.
-// Abstracts shell details, s6 internals, ports, time, and application traffic.
+// readiness, the session command lifetime in both of run.py's modes, attached
+// shells, and supervised shutdown.  Abstracts host-side details, s6 internals,
+// ports, time, and application traffic.
 // Source map: this module corresponds to both files named above. Update and
 // rerun it whenever either source file changes.
+//
+// A session is `run.py` in either mode: foreground (`./run.py [COMMAND]`),
+// whose command exits on its own, or detached (`./run.py up`), whose command
+// is `sleep infinity` and only ends when `./run.py down` signals it.  An
+// attached shell (`./run.py attach`) is a *second* container started with
+// `apptainer exec`: it runs no s6 and starts no service, and it does not take
+// the data-directory lock -- which is why several may coexist with one
+// session without breaking `servicesRequireDataLock`.
+//
+// Not modeled: `./run.py attach` and `./run.py down` refusing to run when no
+// session holds the lock.  Both are host-side diagnostics that leave every
+// modeled variable untouched; the guards on `attachShell` and `requestStop`
+// encode the same precondition.
 module aiida_container {
   type ImagePhase = Absent | Building | Valid | Invalid
+  type SessionMode = NoSession | Foreground | Detached
   type SessionPhase =
     | Idle
-    | CheckingFlock
+    | Validating
     | AcquiringLock
     | Launching
     | StartingServices
@@ -23,15 +38,22 @@ module aiida_container {
     | NoFailure
     | MissingImage
     | PatchRejected
-    | MissingFlock
+    | MissingApptainer
     | DataDirectoryBusy
     | PostgresUnavailable
     | ForeignPostgresDetected
     | RabbitUnavailable
 
+  // An attached shell holds no lock and no service, so the only thing the
+  // model needs from it is how many are around; two is enough to exercise
+  // "more than one" without inflating the state space.
+  pure val maxAttachedShells: int = 2
+
   type ContainerState = {
     image: ImagePhase,
     session: SessionPhase,
+    mode: SessionMode,
+    attachedShells: int,
     lockHeld: bool,
     postgres: ServicePhase,
     postgresIdentity: PostgresIdentity,
@@ -39,6 +61,7 @@ module aiida_container {
     aiidaDaemon: ServicePhase,
     profileReady: bool,
     commandExited: bool,
+    stopRequested: bool,
     failure: FailureReason,
   }
 
@@ -47,6 +70,8 @@ module aiida_container {
   pure val initialState: ContainerState = {
     image: Absent,
     session: Idle,
+    mode: NoSession,
+    attachedShells: 0,
     lockHeld: false,
     postgres: Down,
     postgresIdentity: UnknownPostgres,
@@ -54,6 +79,7 @@ module aiida_container {
     aiidaDaemon: Down,
     profileReady: false,
     commandExited: false,
+    stopRequested: false,
     failure: NoFailure,
   }
 
@@ -72,26 +98,39 @@ module aiida_container {
   pure def applyBuildRejected(s: ContainerState): ContainerState =
     { ...s, image: Invalid, session: Failed, failure: PatchRejected }
 
+  // Both modes take the same path: run.py checks the runtime before it
+  // touches the data directory, whether it will stay in the foreground or
+  // detach.
   pure def canStartSession(s: ContainerState): bool =
-    s.image == Valid and s.session == Idle
+    s.session == Idle
 
-  pure def applyStartSession(s: ContainerState): ContainerState =
-    { ...s, session: CheckingFlock }
+  pure def applyStartSession(
+    s: ContainerState,
+    mode: SessionMode,
+  ): ContainerState =
+    { ...s, session: Validating, mode: mode }
+
+  // run.py's apptainer() checks the binary and the image together, so both
+  // rejections leave from the same phase.  The flock binary is no longer one
+  // of them: the lock is taken through fcntl, which is in the standard
+  // library.
+  pure def canValidate(s: ContainerState): bool =
+    s.session == Validating
+
+  pure def applyMissingApptainer(s: ContainerState): ContainerState =
+    { ...s, session: Failed, failure: MissingApptainer }
 
   pure def canRejectMissingImage(s: ContainerState): bool =
-    s.image == Absent and s.session == Idle
+    s.session == Validating and s.image != Valid
 
   pure def applyMissingImage(s: ContainerState): ContainerState =
     { ...s, session: Failed, failure: MissingImage }
 
-  pure def canCheckFlock(s: ContainerState): bool =
-    s.session == CheckingFlock
+  pure def canFinishValidation(s: ContainerState): bool =
+    s.session == Validating and s.image == Valid
 
-  pure def applyFlockPresent(s: ContainerState): ContainerState =
+  pure def applyValidated(s: ContainerState): ContainerState =
     { ...s, session: AcquiringLock }
-
-  pure def applyMissingFlock(s: ContainerState): ContainerState =
-    { ...s, session: Failed, failure: MissingFlock }
 
   pure def canAcquireLock(s: ContainerState): bool =
     s.session == AcquiringLock
@@ -169,11 +208,42 @@ module aiida_container {
       profileReady: true,
     }
 
+  // `apptainer exec` needs nothing but a live session holding the lock -- not
+  // even ready services, which is why attaching too early is reachable here.
+  pure def canAttachShell(s: ContainerState): bool =
+    s.lockHeld and s.attachedShells < maxAttachedShells
+
+  pure def applyAttachShell(s: ContainerState): ContainerState =
+    { ...s, attachedShells: s.attachedShells + 1 }
+
+  // An attached shell is an independent container; it may also be left behind
+  // when the session it was talking to goes away.
+  pure def canDetachShell(s: ContainerState): bool =
+    s.attachedShells > 0
+
+  pure def applyDetachShell(s: ContainerState): ContainerState =
+    { ...s, attachedShells: s.attachedShells - 1 }
+
+  // Only a foreground session has a command that returns.  `up` runs
+  // `sleep infinity`, so a detached session ends only on a stop signal.
   pure def canExitCommand(s: ContainerState): bool =
-    s.session == RunningCommand and s.aiidaDaemon == Ready
+    and {
+      s.session == RunningCommand,
+      s.mode == Foreground,
+      s.aiidaDaemon == Ready,
+    }
 
   pure def applyCommandExit(s: ContainerState): ContainerState =
     { ...s, session: Stopping, commandExited: true }
+
+  // `./run.py down` -- SIGTERM to the session, which s6 turns into an ordered
+  // shutdown.  The same signal reaches a foreground session from the
+  // terminal, so it is not restricted to the detached mode.
+  pure def canRequestStop(s: ContainerState): bool =
+    s.session == RunningCommand
+
+  pure def applyRequestStop(s: ContainerState): ContainerState =
+    { ...s, session: Stopping, stopRequested: true }
 
   pure def canStopAiida(s: ContainerState): bool =
     s.session == Stopping and s.aiidaDaemon != Down
@@ -231,9 +301,19 @@ module aiida_container {
     state' = applyBuildRejected(state),
   }
 
-  action startSession: bool = all {
+  action startForegroundSession: bool = all {
     canStartSession(state),
-    state' = applyStartSession(state),
+    state' = applyStartSession(state, Foreground),
+  }
+
+  action startDetachedSession: bool = all {
+    canStartSession(state),
+    state' = applyStartSession(state, Detached),
+  }
+
+  action rejectMissingApptainer: bool = all {
+    canValidate(state),
+    state' = applyMissingApptainer(state),
   }
 
   action rejectMissingImage: bool = all {
@@ -241,14 +321,9 @@ module aiida_container {
     state' = applyMissingImage(state),
   }
 
-  action flockPresent: bool = all {
-    canCheckFlock(state),
-    state' = applyFlockPresent(state),
-  }
-
-  action rejectMissingFlock: bool = all {
-    canCheckFlock(state),
-    state' = applyMissingFlock(state),
+  action validationPassed: bool = all {
+    canFinishValidation(state),
+    state' = applyValidated(state),
   }
 
   action acquireDataLock: bool = all {
@@ -309,9 +384,24 @@ module aiida_container {
     state' = applyAiidaReady(state),
   }
 
+  action attachShell: bool = all {
+    canAttachShell(state),
+    state' = applyAttachShell(state),
+  }
+
+  action detachShell: bool = all {
+    canDetachShell(state),
+    state' = applyDetachShell(state),
+  }
+
   action commandExit: bool = all {
     canExitCommand(state),
     state' = applyCommandExit(state),
+  }
+
+  action requestStop: bool = all {
+    canRequestStop(state),
+    state' = applyRequestStop(state),
   }
 
   action stopAiida: bool = all {
@@ -338,10 +428,11 @@ module aiida_container {
     beginBuild,
     buildSuccess,
     buildRejected,
-    startSession,
+    startForegroundSession,
+    startDetachedSession,
+    rejectMissingApptainer,
     rejectMissingImage,
-    flockPresent,
-    rejectMissingFlock,
+    validationPassed,
     acquireDataLock,
     rejectBusyDataDirectory,
     launchContainer,
@@ -352,7 +443,10 @@ module aiida_container {
     rabbitUnavailable,
     startAiida,
     aiidaReady,
+    attachShell,
+    detachShell,
     commandExit,
+    requestStop,
     stopAiida,
     stopRabbit,
     stopPostgres,
@@ -387,6 +481,25 @@ module aiida_container {
       state.aiidaDaemon == Down,
       not(state.profileReady),
       state.failure == ForeignPostgresDetected,
+    }
+
+  // Attached shells start no service, so they must never be the reason the
+  // lock is held -- `servicesRequireDataLock` above is what would break if
+  // this model ever gave `attachShell` a service of its own.
+  val attachedShellsBelongToASession: bool =
+    state.attachedShells > 0 implies state.mode != NoSession
+
+  // `up`'s command is `sleep infinity`; only a signal ends a detached session.
+  val detachedCommandNeverReturns: bool =
+    state.commandExited implies state.mode == Foreground
+
+  // Every way into shutdown is accounted for: the command returned, someone
+  // asked for it, or a service failed to come up.
+  val shutdownHasACause: bool =
+    state.session == Stopping implies or {
+      state.commandExited,
+      state.stopRequested,
+      state.failure != NoFailure,
     }
 
   val finishedSessionIsClean: bool =

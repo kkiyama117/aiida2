@@ -2,16 +2,52 @@
 
 ## Session lifetime
 
-`run.sh` uses `apptainer run`, which is a foreground session. s6-overlay
+`run.py` uses `apptainer run`, which is a foreground session. s6-overlay
 brings the services up, runs your command, and tears everything down when it
 returns — including the AiiDA daemon. Anything submitted has to finish while
 the session is alive.
 
 `apptainer instance start` is not an option: the instance master process is
-always PID 1, so s6 aborts with `s6-overlay-suexec: fatal: can only run as
-pid 1`, even with `--no-init`. That is why the definition file has no
-`%startscript`. For unattended runs, keep the session alive yourself, e.g.
-under `tmux`, or `nohup ./run.sh verdi run script.py &`.
+always PID 1, so s6 never gets it and the services simply do not start (with
+a `%startscript` it aborts outright, `s6-overlay-suexec: fatal: can only run
+as pid 1`, even with `--no-init`). That is why the definition file has no
+`%startscript`, and why there is no real daemon mode here.
+
+`./run.py up` is the closest thing to one: the same `apptainer run` session,
+with `sleep infinity` as its command, started with `start_new_session()` so it
+outlives the shell that launched it. Its output goes to
+`$AIIDA_DATA_HOME/container.log`, and `up` waits for s6's
+`legacy-services successfully started` before returning — a more honest
+readiness signal than an open port, which on a shared network namespace may
+belong to a foreign server. `./run.py down` sends it `SIGTERM`; s6 stops the
+daemon, RabbitMQ and PostgreSQL in order, which takes a few seconds.
+
+Nothing supervises that process: it does not survive a reboot and is not
+restarted if it dies. It is a session left running, not a service.
+
+## Attaching
+
+`./run.py attach` does *not* enter the running container — Apptainer has no
+`docker exec`, and joining the session's PID and mount namespaces would need
+privileges. It starts a second container with `apptainer exec`, which skips
+the runscript, so s6 never runs there and no service is started or stopped.
+
+It works because of what the two containers share:
+
+- the **host network namespace**, so `verdi` reaches PostgreSQL on
+  `localhost:${PGPORT}` and RabbitMQ on 5672 exactly as it does inside the
+  session;
+- the **bind-mounted state directories**, so it sees the same profile,
+  configuration and file repository.
+
+What it does not share is everything in the writable tmpfs, `~/.erlang.cookie`
+included — that is regenerated per container, so `rabbitmqctl` and
+`rabbitmq-diagnostics` cannot reach the broker from an attached shell. `verdi`
+can: it speaks AMQP with `guest`/`guest`. PIDs reported by `verdi daemon`
+belong to the session's PID namespace and mean nothing in the attached one.
+
+`attach` deliberately does not take the lock below. It starts no services, so
+several attached shells alongside one session are fine.
 
 ## Ports
 
@@ -80,8 +116,13 @@ path in the image that is not world-readable, and the image is read-only at
 runtime anyway. The bundled services do not use `s6-setuidgid`, so no uid
 switch is involved and any host user works.
 
-`run.sh` takes a `flock` on `$AIIDA_DATA_HOME/.lock`; two containers sharing
-one data directory would corrupt the PostgreSQL cluster and the mnesia store.
+`run.py` takes a `flock` on `$AIIDA_DATA_HOME/.lock` (via `fcntl`, so no
+util-linux binary is needed) and leaves the file descriptor open in the
+container; two service containers sharing one data directory would corrupt the
+PostgreSQL cluster and the mnesia store. The lock lives on the open file
+description, so the kernel releases it when the container dies — there is no
+stale lock to clear after a crash. The pid written into the file is only what
+`status` and `down` report.
 
 ## Image patches
 

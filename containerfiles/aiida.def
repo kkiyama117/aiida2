@@ -35,7 +35,7 @@ From: aiidateam/aiida-core-with-services@sha256:37c129aaba7e9347b0982746e8477fd8
     sed -i 's|--postgres-password "${AIIDA_POSTGRES_PASSWORD:-password}"|& \\\n        --postgres-port "${PGPORT:-5433}"|' /etc/init/aiida-prepare.sh
     assert /etc/init/aiida-prepare.sh '--postgres-port "${PGPORT:-5433}"'
 
-    # The stock check is `[ ! -d ~/.postgresql ]`, but run.sh bind-mounts
+    # The stock check is `[ ! -d ~/.postgresql ]`, but run.py bind-mounts
     # that directory, so it always exists and `initdb` would never run.  Key
     # the check on the cluster marker file instead.
     sed -i 's|^if \[ ! -d /home/${SYSTEM_USER}/.postgresql \]; then$|if [ ! -f /home/${SYSTEM_USER}/.postgresql/PG_VERSION ]; then|' /etc/init/postgresql-init.sh
@@ -150,12 +150,12 @@ EOF
 
 # No %startscript: `apptainer instance start` always keeps its own process as
 # PID 1, so s6-overlay-suexec aborts with "can only run as pid 1" even with
-# --no-init.  This image only works as a foreground session (see run.sh).
+# --no-init.  This image only works as a foreground session (see run.py).
 
 %help
     AiiDA 2.9.0 with bundled PostgreSQL and RabbitMQ.
 
     The image is supervised by s6-overlay, which must be PID 1 and needs a
     writable /run, and only the state directories may be bind-mounted --
-    aiida-core itself lives in the image's /home/aiida/.local.  Use ./run.sh,
+    aiida-core itself lives in the image's /home/aiida/.local.  Use ./run.py,
     which wraps all of that.

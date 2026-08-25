@@ -26,6 +26,25 @@ module aiida_container_test {
       state.failure == NoFailure,
     }
 
+  val detachedSessionStopped: bool =
+    and {
+      state.mode == Detached,
+      state.session == Finished,
+      state.stopRequested,
+      state.failure == NoFailure,
+    }
+
+  val attachedShellRan: bool =
+    state.attachedShells > 0 and state.aiidaDaemon == Ready
+
+  val severalShellsAttached: bool =
+    state.attachedShells > 1
+
+  // Nothing stops an attached shell from outliving the session it was using;
+  // once that happens it has no services left to talk to.
+  val attachedShellOutlivedSession: bool =
+    state.attachedShells > 0 and state.session == Finished
+
   val failedServiceStartupWasCleanedUp: bool =
     and {
       state.session == Finished,
@@ -38,8 +57,8 @@ module aiida_container_test {
   val badImagePatchRejected: bool =
     state.failure == PatchRejected
 
-  val missingFlockRejected: bool =
-    state.failure == MissingFlock
+  val missingApptainerRejected: bool =
+    state.failure == MissingApptainer
 
   val busyDataDirectoryRejected: bool =
     state.failure == DataDirectoryBusy
