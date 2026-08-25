@@ -3,3 +3,6 @@ data
 **/*.sif
 
 .vscode
+
+__pycache__
+*.py[co]

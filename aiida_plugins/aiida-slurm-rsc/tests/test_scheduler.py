@@ -1,5 +1,8 @@
-"""Unit test for SlurmRscScheduler header generation (no cluster interaction)."""
+"""Submit-script header generation. No cluster, no profile, no daemon."""
+
+import pytest
 from aiida.schedulers.datastructures import JobTemplate
+
 from aiida_slurm_rsc.scheduler import SlurmRscScheduler
 
 FORBIDDEN = ["--nodes", "--ntasks", "--cpus-per-task", "--mem=", "--qos", "--account", "--get-user-env"]
@@ -22,8 +25,6 @@ def make_template(**overrides):
     tmpl.job_name = "qe_test"
     tmpl.queue_name = "gr10641a"
     tmpl.max_wallclock_seconds = 3600
-    tmpl.email = "kiyama.kouhei.54v@st.kyoto-u.ac.jp"
-    tmpl.email_on_terminated = True
     tmpl.rerunnable = True
     tmpl.sched_output_path = "_aiidasubmit.sh.out"
     tmpl.sched_error_path = "_aiidasubmit.sh.err"
@@ -32,54 +33,79 @@ def make_template(**overrides):
     return sched, tmpl
 
 
+def header(**overrides):
+    sched, tmpl = make_template(**overrides)
+    return sched._get_submit_script_header(tmpl)
+
+
 def test_basic_header():
-    sched, tmpl = make_template()
-    header = sched._get_submit_script_header(tmpl)
-    print("=== header ===")
-    print(header)
-    assert "#SBATCH --rsc p=1:t=4:c=4:m=8G" in header, header
-    assert "#SBATCH --partition=gr10641a" in header
-    assert "#SBATCH --time=01:00:00" in header
-    assert "#SBATCH --mail-user=kiyama.kouhei.54v@st.kyoto-u.ac.jp" in header
-    assert "#SBATCH --mail-type=FAIL" in header and "#SBATCH --mail-type=END" in header
+    text = header()
+    assert "#SBATCH --rsc p=1:t=4:c=4:m=8G" in text, text
+    assert "#SBATCH --partition=gr10641a" in text
+    assert "#SBATCH --time=01:00:00" in text
     for bad in FORBIDDEN:
-        assert bad not in header, f"forbidden option emitted: {bad}\n{header}"
-    print("PASS: basic header")
+        assert bad not in text, f"forbidden option emitted: {bad}\n{text}"
 
 
 def test_cores_per_mpiproc():
-    sched, tmpl = make_template(num_mpiprocs_per_machine=2, num_cores_per_mpiproc=4)
-    header = sched._get_submit_script_header(tmpl)
-    assert "#SBATCH --rsc p=1:t=8:c=8:m=8G" in header, header
-    print("PASS: cores = mpiprocs x cores_per_mpiproc")
+    assert "#SBATCH --rsc p=1:t=8:c=8:m=8G" in header(
+        num_mpiprocs_per_machine=2, num_cores_per_mpiproc=4
+    )
 
 
-def test_memory_rounding():
-    sched, tmpl = make_template(max_memory_kb=9 * 1024 * 1024 + 1)  # just over 9 GiB
-    header = sched._get_submit_script_header(tmpl)
-    assert "#SBATCH --rsc p=1:t=4:c=4:m=10G" in header, header
-    print("PASS: memory rounds up to GiB")
+def test_memory_rounds_up_to_gib():
+    assert "#SBATCH --rsc p=1:t=4:c=4:m=10G" in header(max_memory_kb=9 * 1024 * 1024 + 1)
 
 
-def test_no_memory():
-    sched, tmpl = make_template(max_memory_kb=None)
-    header = sched._get_submit_script_header(tmpl)
-    assert "#SBATCH --rsc p=1:t=4:c=4" in header, header
-    assert ":m=" not in header
-    print("PASS: memory omitted when unset")
+def test_memory_omitted_when_unset():
+    text = header(max_memory_kb=None)
+    assert "#SBATCH --rsc p=1:t=4:c=4" in text
+    assert ":m=" not in text
 
 
 def test_no_requeue():
-    sched, tmpl = make_template(rerunnable=False)
-    header = sched._get_submit_script_header(tmpl)
-    assert "#SBATCH --no-requeue" in header
-    print("PASS: --no-requeue")
+    assert "#SBATCH --no-requeue" in header(rerunnable=False)
 
 
-if __name__ == "__main__":
-    test_basic_header()
-    test_cores_per_mpiproc()
-    test_memory_rounding()
-    test_no_memory()
-    test_no_requeue()
-    print("\nALL TESTS PASSED")
+def test_priority_becomes_nice():
+    assert "#SBATCH --nice=1000" in header(priority="1000")
+
+
+def test_custom_scheduler_commands_are_appended():
+    """The channel mail_scheduler_commands() rides on."""
+    text = header(custom_scheduler_commands="#SBATCH --mail-user=someone@example.org")
+    assert text.endswith("#SBATCH --mail-user=someone@example.org")
+
+
+def test_no_mail_without_job_template_email():
+    """aiida-core leaves JobTemplate.email unset, so the header carries no mail."""
+    assert "--mail-" not in header()
+
+
+def test_job_template_email_is_still_honoured():
+    """Kept for the day aiida-core starts filling the template in."""
+    text = header(email="someone@example.org", email_on_terminated=True)
+    assert "#SBATCH --mail-user=someone@example.org" in text
+    assert "#SBATCH --mail-type=END,FAIL" in text
+
+
+def test_job_template_email_without_events_sends_nothing():
+    """An address with no event would leave Slurm to its own default."""
+    assert "--mail-" not in header(email="someone@example.org")
+
+
+def test_bad_memory_raises():
+    with pytest.raises(ValueError, match="max_memory_kb"):
+        header(max_memory_kb="lots")
+
+
+def test_bad_wallclock_raises():
+    with pytest.raises(ValueError, match="max_wallclock_seconds"):
+        header(max_wallclock_seconds=0)
+
+
+def test_resources_are_required():
+    sched, tmpl = make_template()
+    tmpl.job_resource = None
+    with pytest.raises(ValueError, match="Job resources"):
+        sched._get_submit_script_header(tmpl)

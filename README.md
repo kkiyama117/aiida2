@@ -25,9 +25,12 @@ the session. Editing a plugin therefore means rebuilding the image.
 | --- | --- | --- |
 | `aiida-slurm-rsc` | `slurm_rsc` (`aiida.schedulers`) | Slurm scheduler for KUDPC Camphor (`sp`). The cluster forbids `--nodes`, `--ntasks*`, `--cpus-per-task`, `--mem` and `--qos` and wants `#SBATCH --rsc p=N:t=N:c=N:m=NG` instead, so the plugin subclasses `SlurmScheduler` and reimplements only the submit-script header; `squeue`/`sacct` parsing is inherited. |
 
+Each plugin's tests run in the image, where aiida-core is; pytest is installed
+alongside them.
+
 ```console
 $ ./run.py attach verdi plugin list aiida.schedulers        # slurm_rsc is listed
-$ ./run.py attach python3 /opt/aiida_plugins/aiida-slurm-rsc/tests/test_scheduler.py
+$ ./run.py attach bash -c 'cd /opt/aiida_plugins/aiida-slurm-rsc && python3 -m pytest'
 ```
 
 A computer picks it up at setup time — `verdi computer setup --scheduler
@@ -35,6 +38,12 @@ slurm_rsc` — and nothing else changes: calculations keep declaring ordinary
 AiiDA `resources`, and the plugin maps
 `num_machines`/`num_mpiprocs_per_machine × num_cores_per_mpiproc`/
 `max_memory_kb` onto `p`/`t`=`c`/`m` (memory rounded up to whole GiB).
+
+It also ships **mail notification**, which aiida-core has no option for:
+`mail_scheduler_commands()` renders the `#SBATCH --mail-*` lines into
+`metadata.options.custom_scheduler_commands`, taking the address from the
+`Computer`'s own metadata. Nothing is sent until that property is set. See
+[`aiida_plugins/aiida-slurm-rsc/README.md`](aiida_plugins/aiida-slurm-rsc/README.md).
 
 ## Run
 

@@ -9,8 +9,14 @@ description = "AiiDA Slurm scheduler plugin for KUDPC Camphor (sp): emits the cu
 requires-python = ">=3.10"
 dependencies = ["aiida-core>=2.0"]
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [project.entry-points."aiida.schedulers"]
 slurm_rsc = "aiida_slurm_rsc.scheduler:SlurmRscScheduler"
 
 [tool.setuptools.packages.find]
 include = ["aiida_slurm_rsc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

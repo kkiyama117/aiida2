@@ -10,6 +10,11 @@ This plugin subclasses AiiDA's ``SlurmScheduler`` and reimplements only the
 submit-script header, emitting ``--rsc`` (same convention as the group's
 ``slurm-async-runner`` pipeline) and skipping every option that KUDPC forbids.
 All job-queue parsing (squeue/sacct) is inherited unchanged.
+
+Mail notification is not configured here: aiida-core never fills in
+``JobTemplate.email``, so it travels as ``custom_scheduler_commands`` built by
+:func:`aiida_slurm_rsc.mail.mail_scheduler_commands`.  The ``job_tmpl.email``
+branch below is kept for the day aiida-core starts setting it.
 """
 
 from __future__ import annotations
@@ -44,16 +49,14 @@ class SlurmRscScheduler(SlurmScheduler):
         else:
             lines.append('#SBATCH --no-requeue')
 
+        # Dead with every aiida-core released so far; see the module docstring.
         if job_tmpl.email:
-            # If not specified, but email events are set, SLURM
-            # sends the mail to the job owner by default
-            lines.append(f'#SBATCH --mail-user={job_tmpl.email}')
-
-        if job_tmpl.email_on_started:
-            lines.append('#SBATCH --mail-type=BEGIN')
-        if job_tmpl.email_on_terminated:
-            lines.append('#SBATCH --mail-type=FAIL')
-            lines.append('#SBATCH --mail-type=END')
+            mail_types = ['BEGIN'] if job_tmpl.email_on_started else []
+            if job_tmpl.email_on_terminated:
+                mail_types += ['END', 'FAIL']
+            if mail_types:
+                lines.append(f'#SBATCH --mail-user={job_tmpl.email}')
+                lines.append(f'#SBATCH --mail-type={",".join(mail_types)}')
 
         if job_tmpl.job_name:
             # Same sanitization as the stock Slurm plugin
