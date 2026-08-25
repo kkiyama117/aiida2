@@ -48,8 +48,7 @@ From: aiidateam/aiida-core-with-services@sha256:37c129aaba7e9347b0982746e8477fd8
     # server has been moved.  s6-rc then waits on this oneshot forever and
     # the container hangs before ever reaching CMD.
     #
-    # "Something answers on the port" is the wrong question anyway: Apptainer
-    # shares the host network namespace, so an unrelated server can answer --
+    # Apptainer shares the host network namespace, so an unrelated server can answer
     # and if it does, ours could not bind the port and AiiDA would silently
     # be initialised against the foreign database.  `pg_ctl status` is not
     # enough either (initdb's own single-user backend writes postmaster.pid,
@@ -125,17 +124,11 @@ EOF
     }
 
 %environment
-    # Apptainer overrides HOME with the host user's home; the image installs
-    # aiida-core with `pip --user` into /home/aiida/.local, so restore it.
     export HOME=/home/aiida
     # s6-overlay resets the environment for the supervision tree by default;
     # keep it so HOME and PGPORT reach the services and the CMD.
     export S6_KEEP_ENV=1
-    # Fail after 10 minutes instead of the image default of "wait forever"
-    # if a service never comes up.
     export S6_CMD_WAIT_FOR_SERVICES_MAXTIME=600000
-    # Client-side default port for psql/pg_isready/verdi, matching the
-    # server port written into postgresql.conf on first init.
     export PGPORT="${AIIDA_POSTGRES_PORT:-5433}"
     # fix-permissions chgrp's to ${SYSTEM_GID} (100 in the image).  Only the
     # invoking user's gid is mapped inside Apptainer's user namespace, so
