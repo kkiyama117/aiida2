@@ -14,8 +14,8 @@ route_parameters:
 resources:
   num_machines: 1
   num_mpiprocs_per_machine: 1
-  num_cores_per_mpiproc: 4
-memory_gb: 4
+  num_cores_per_mpiproc: 16
+memory_gb: 16
 max_wallclock_seconds: 1800
 queue: gr10641a # optional; falls back to the computer's default_queue
 mail: default # default | terminal | none | [BEGIN, END]
