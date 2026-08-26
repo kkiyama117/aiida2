@@ -111,9 +111,15 @@ The builder must:
   process, not multiple MPI processes;
 - set `%nprocshared` to `num_cores_per_mpiproc`;
 - request `memory_gb` from Slurm but set Gaussian `%mem` to
-  `floor(0.75 * memory_gb)` GiB, rejecting values that leave less than 1 GiB.
-  Gaussian `%mem` covers dynamic memory and must leave room for the executable,
-  static memory and buffers;
+  `memory_gb - 1` GiB, rejecting a `memory_gb` below 2. `%mem` covers *dynamic*
+  memory only; the executable, static memory, thread stacks and I/O buffers sit
+  on top of it. That overhead is roughly constant, not proportional, so the
+  headroom is a fixed amount rather than a percentage — a percentage rule
+  wastes progressively more memory as allocations grow. The 1 GiB constant is
+  provisional and is checked against reality in Step 7;
+- always emit an explicit unit. A bare `%mem=3` means three 8-byte *words*, not
+  3 GB: `%Mem` "sets the amount of dynamic memory used to N 8-byte words
+  (default)";
 - use the calculation's `queue` or fall back to the Computer's
   `default_queue` property;
 - set `%chk=aiida.chk` explicitly. Neither aiida-gaussian nor pymatgen injects
@@ -145,6 +151,11 @@ First run `verdi computer test sp`. Then submit, watch with
 `verdi process list` / `verdi process report`, and collect
 `output_parameters`, `output_structure` and `energy_ev`.
 
+Also record the job's peak resident memory (`sacct -j <jobid> -o MaxRSS`) and
+compare it with `%mem`. This is the first measurement of what Gaussian
+actually costs on top of `%mem` on KUDPC, and it is what turns the Step 5
+headroom constant from borrowed convention into a site-specific number.
+
 This settles roadmap risk #1 (`g16 < aiida.inp` over stdin). If stdin does
 not work, register a thin wrapper as the code's executable — a one-line
 change in `config/site.yaml`.
@@ -154,7 +165,11 @@ Prerequisite: the `./run.py up` session must stay alive while the job runs.
 ### Step 8 — documentation
 
 README section covering the two config files, the calculation format, and
-the dry-run-first workflow.
+the dry-run-first workflow. Record the `%mem` headroom rule together with the
+`MaxRSS` measured in Step 7, so the constant is traceable to data rather than
+to an inherited rule of thumb. Gaussian's own documentation prescribes no
+ratio between `%mem` and the scheduler allocation; published site guidance
+ranges from "at least 1 GB less" to "under 80% of physical memory".
 
 ## Acceptance gate
 
@@ -166,7 +181,7 @@ Phase 1 is complete only when all of these hold (from the roadmap):
    and Code identities.
 3. The automated dry-run test shows the exact KUDPC resource shape and quoted
    `srun g16` command, with `%nprocshared` equal to the allocated cores and
-   `%mem` equal to the documented 75% memory budget.
+   `%mem` equal to the allocated memory minus the documented 1 GiB headroom.
 4. With cluster access, `verdi computer test sp` passes.
 5. A real H2O job finishes, parses, and exposes `output_parameters`,
    `output_structure` and `energy_ev`.

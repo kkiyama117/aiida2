@@ -4,6 +4,11 @@ Reviewed 2026-08-26 against the actual repository, the running container
 (aiida-core 2.9.0, Python 3.10.13, numpy 2.2.6) and `aiida-gaussian` 2.2.0
 from PyPI. Every claim below marked *verified* was checked by running it.
 
+**Status: resolved.** The revised plan (commit `a3b9bda`) addresses every item
+below, and Phase 1 is approved for implementation. See the addendum at the end
+for the two follow-ups: a correction to this review's own memory advice, and
+one outstanding documentation inconsistency.
+
 ## Verdict
 
 The structure and the ordering are sound — image → binds → config → setup →
@@ -212,3 +217,85 @@ worth stating in Step 2/3. A site reached through a gateway will need
 
 **Priority:** 1 → 2(a)(b)(d)(f) → 3(g)(h) → 4. Items 1 and 2(a) must be
 fixed before Step 1 and Step 6 can be executed at all.
+
+
+---
+
+# Addendum (2026-08-26)
+
+## Correction: the 70–80% memory figure in §3(g) had no source
+
+Section 3(g) above says "convention is 70–80% of the allocation", and the
+revised plan turned that into `floor(0.75 * memory_gb)`. Asked for the source,
+there isn't one. Recording what the primary and secondary sources actually
+say, since the number was about to be frozen into an acceptance gate:
+
+**Gaussian's own documentation prescribes no ratio at all.**
+[Link 0 Commands](https://gaussian.com/link0/) says only that `%Mem` "Sets the
+amount of dynamic memory used to N 8-byte words (default)", that "The default
+memory size is 800 MB", and that `%NProcShared` "Requests that the job use up
+to N processors/cores on shared memory parallel execution on SMP
+multiprocessor computers".
+
+**Published site guidance disagrees with itself** — on the number *and* on
+what it is a fraction of:
+
+| source | rule | measured against |
+| --- | --- | --- |
+| [Sigma2 / NRIS](https://documentation.sigma2.no/software/application_guides/gaussian/gaussian_resources.html) | under **80%** is "good practice" | node *physical* memory |
+| [CU Boulder RC](https://curc.readthedocs.io/en/latest/software/gaussian.html) | **at least 50%** | the Slurm request (a *lower* bound) |
+| [Princeton RC](https://researchcomputing.princeton.edu/support/knowledge-base/gaussian) | **at least 1 GB less** | the Slurm request (fixed offset) |
+| [CSUC](https://confluence.csuc.cat/pages/viewpage.action?pageId=29362412) | **~75%** | the Slurm request |
+
+(The Princeton and CSUC pages were not directly reachable — 403 and a TLS
+error — so those two rows come from search snippets rather than from the pages
+themselves.)
+
+**A percentage is the wrong shape.** What the headroom pays for — the
+executable image, static memory, per-thread stacks, I/O buffers — is roughly
+constant, so a ratio mis-scales in both directions:
+
+| allocation | 75% rule | headroom | |
+| --- | --- | --- | --- |
+| 2 GB | 1.5 GB | 0.5 GB | probably too little |
+| 4 GB | 3 GB | 1 GB | reasonable |
+| 16 GB | 12 GB | 4 GB | 3 GB wasted |
+| 64 GB | 48 GB | 16 GB | 15 GB wasted, and paid for |
+
+Princeton's fixed-offset form is the better one. The plan now uses
+`%mem = memory_gb - 1` GiB (reject below 2 GiB), documents the constant as
+provisional, and measures `MaxRSS` in Step 7 to replace convention with a
+KUDPC number.
+
+Changing the rule cost nothing: at the H2O example's 4 GB both rules give
+`3 GB`, so Step 6's expected `%mem=3GB` and acceptance criterion 3 are
+unaffected.
+
+Two smaller points that came out of the same check:
+
+- `%Mem`'s **default unit is 8-byte words**, so a bare `%mem=3` is 24 bytes,
+  not 3 GB. `submit.py` must always emit an explicit unit. (`3GW` would be
+  24 GB inside a 4 GB allocation — the same footgun in the other direction.)
+- §3(g)'s description of the failure mode stands: an OOM-killed Gaussian
+  writes no `Normal termination`, and `aiida-gaussian` reports that as exit
+  code 391 `ERROR_NO_NORMAL_TERMINATION`, whose message reads "probably out of
+  time". Memory exhaustion presents as a timeout.
+
+## Outstanding: the roadmap is now stale
+
+`docs/gaussian-plan.md` still carries the pre-revision Phase 1 design, and the
+Phase 1 plan's acceptance gate cites it ("from the roadmap") while no longer
+matching it:
+
+| line | stale content |
+| --- | --- |
+| 109 | "aiida-gaussian 2.1.0" (current: 2.2.0) |
+| 171 | `default_queue:` as a `Computer` field (no such field exists) |
+| 260 | Step 3 ends with `verdi computer test <label>` (moved to Step 7) |
+| 275 | `srun 'g16' …` — missing the quoting on `srun` |
+| 276, 301 | "`%nprocshared` and `%mem` match the `--rsc` line" |
+| 293-307 | the five-item acceptance gate (the plan now has six) |
+
+Either update that section or mark it superseded by
+`docs/plans/gaussian_plan_phase1.md`. This is a documentation fix; it does not
+block implementation.
