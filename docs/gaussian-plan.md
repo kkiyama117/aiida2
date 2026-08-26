@@ -1,5 +1,10 @@
 # Roadmap: from one Gaussian job to reusable AiiDA workflows
 
+> **Note:** the Phase 1 design below predates the review; the authoritative,
+> revised Phase 1 specification is
+> [`docs/plans/gaussian_plan_phase1.md`](plans/gaussian_plan_phase1.md)
+> (aiida-gaussian 2.2.0, `%mem` headroom rule, `srun 'g16' …` quoting,
+> `default_queue`/`safe_interval` placement). Later phases are unaffected.
 Status: **proposed roadmap** — the container and `aiida-slurm-rsc` exist; the
 Gaussian and workflow phases below have not been implemented.
 

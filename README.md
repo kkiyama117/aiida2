@@ -3,9 +3,11 @@
 AiiDA 2.9.0 + PostgreSQL + RabbitMQ in a single Apptainer container, built
 from the official `aiidateam/aiida-core-with-services` image.
 
-The calculation layer is arriving: `aiida_plugins/aiida-slurm-rsc` (the
-KUDPC `sp` scheduler) is in the tree and baked into the image. The QE and
-Gaussian workflows are not.
+The calculation layer is here: `aiida_plugins/aiida-slurm-rsc` (the KUDPC
+`sp` scheduler) is in the tree and baked into the image, alongside
+upstream `aiida-gaussian` 2.2.0 (`gaussian` CalcJob, `gaussian.base`
+parser) installed from PyPI with its dependency tree at build time. The
+workflows are not — see docs/gaussian-plan.md.
 
 ## Build
 
@@ -97,6 +99,70 @@ State lives in `data/container/home` (git-ignored); set `AIIDA_DATA_HOME` to
 use another directory. One container per data directory: `run.py` holds an
 `flock` on `<data>/.lock` for as long as the session lives.
 
+
+## Site setup and one calculation
+
+Everything site-specific lives in two git-ignored config files; committed
+`.example` versions document the format. Nothing is bound or configured by
+default — a fresh clone carries no credentials. **First time here? Follow
+[docs/site-setup.md](docs/site-setup.md)** — a step-by-step walkthrough from
+SSH key to the first submitted calculation.
+
+### `config/binds.conf`
+
+Extra Apptainer bind mounts appended by `run.py` for `up`, `shell` and
+`attach` alike: one `src:dst[:ro]` per line, `#` comments, `~` expands. A
+missing source fails loudly instead of letting Apptainer create an empty
+directory, and destinations may not shadow `/home/aiida/.local` (aiida-core)
+or `/home/aiida/.aiida`. For cluster access, bind your key and `known_hosts`
+as individual read-only files (see
+[`config/binds.example.conf`](config/binds.example.conf)); the host key must
+already be registered — AiiDA's default `RejectPolicy` stays.
+
+### `config/site.yaml`
+
+Read inside the container by `tools/setup_site.py`, which creates/updates the
+Computer (`sp`, scheduler `slurm_rsc`, transport `core.ssh`,
+`mpirun_command: [srun]`) and the `g16` code idempotently — run it twice,
+identities are preserved. `mail_user` and `default_queue` are stored as
+Computer properties; the nested `ssh:` mapping becomes transport auth
+parameters. See [`config/site.example.yaml`](config/site.example.yaml).
+
+```console
+$ ./run.py attach python3 tools/setup_site.py
+```
+
+### Submitting: dry run first
+
+A calculation is one small YAML ([`examples/h2o_opt.yaml`](examples/h2o_opt.yaml)):
+code, structure file, route, and one resource block that is the single source
+for both the Slurm allocation and Gaussian's link0 block.
+`tools/submit.py --dry-run` renders `_aiidasubmit.sh` and `aiida.inp` locally
+(no SSH, no cluster) so the shape can be checked before touching KUDPC;
+`tests/test_dry_run_integration.py` asserts exactly that shape.
+
+```console
+$ ./run.py attach python3 tools/submit.py examples/h2o_opt.yaml --dry-run
+$ ./run.py attach python3 tools/submit.py examples/h2o_opt.yaml   # real submit
+```
+
+Resource derivation rules:
+
+- `%nprocshared = num_cores_per_mpiproc`; Slurm gets
+  `--rsc p=1:t=C:c=C:m=MG` from the same numbers.
+- `%mem = memory_gb - 1` GiB, never below `memory_gb: 2`: `%mem` covers
+  *dynamic* memory only — executable, static memory, thread stacks and I/O
+  buffers sit on top — so the headroom is a fixed 1 GiB, not a percentage
+  (a percentage wastes progressively more as allocations grow). The constant
+  stays provisional: KUDPC's accounting reports `MaxRSS = 0` for every step
+  (first real job 8449824 verified), so there is no measured peak to
+  calibrate against; revisit only if a larger job dies from memory.
+  Always emit an explicit unit — a bare `%mem=4` means four 8-byte words.
+- `num_mpiprocs_per_machine` must be 1: Gaussian uses one shared-memory
+  process; `withmpi=True` + `mpirun_command: [srun]` prefixes `g16` with
+  `srun`; it does not mean multiple MPI processes.
+
+## Limitations
 ## Limitations
 
 - **It is a session, not a service.** When the command exits, s6 stops the

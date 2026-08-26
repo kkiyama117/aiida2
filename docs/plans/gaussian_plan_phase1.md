@@ -1,8 +1,12 @@
 # Phase 1 plan: one H2O Gaussian vertical slice
 
-Status: **planned** — implements Phase 1 of
-[`docs/gaussian-plan.md`](../gaussian-plan.md). Nothing below has been
-implemented yet.
+Status: **complete** (2026-08-26). Steps 1–6 and 8 implemented locally;
+Step 7 executed against KUDPC Camphor: job 8449824 (`aiida-57`,
+H2O B3LYP/6-31G(d) opt) COMPLETED in 12 s, E = −2079.1935 eV, normal
+termination — acceptance gates 4–6 satisfied end to end. One operational
+finding: `load_system_host_keys: true` must be set in the site.yaml ssh
+mapping, or the transport never reads known_hosts. Implements Phase 1 of
+[`docs/gaussian-plan.md`](../gaussian-plan.md).
 
 ## Goal
 
