@@ -143,6 +143,18 @@ EOF
     HOME=/home/aiida pip install --user --no-deps --no-build-isolation \
         --no-cache-dir /opt/aiida_plugins/aiida-slurm-rsc
 
+    # Upstream Gaussian plugin, installed with normal dependency resolution:
+    # unlike aiida-slurm-rsc it has a substantial dependency tree (pymatgen,
+    # ase, cclib, scipy, matplotlib, pandas, sympy, spglib, monty, networkx,
+    # ...), which --no-deps would leave out.  The constraints stop the
+    # resolver from replacing the versions supplied by the pinned base image;
+    # transitive scientific packages stay resolver-selected for Python 3.10,
+    # so their versions can move between rebuilds.
+    printf 'aiida-core==2.9.0\nnumpy==2.2.6\n' > /tmp/gaussian-constraints.txt
+    HOME=/home/aiida pip install --user --no-cache-dir \
+        -c /tmp/gaussian-constraints.txt 'aiida-gaussian==2.2.0'
+    rm /tmp/gaussian-constraints.txt
+
     # The plugins' test suites run in this image (there is nowhere else to run
     # them: aiida-core is only installed here), so pytest is part of it.  It is
     # the `test` extra of every plugin, installed by name because --no-deps
@@ -153,8 +165,18 @@ EOF
     # `verdi computer setup` rejecting the scheduler name.  Check it here.
     HOME=/home/aiida python3 - <<'EOF'
 from importlib.metadata import entry_points
-names = sorted(e.name for e in entry_points(group="aiida.schedulers"))
-assert "slurm_rsc" in names, f"PATCH FAILED: aiida.schedulers = {names}"
+
+def names(group):
+    return sorted(e.name for e in entry_points(group=group))
+
+schedulers = names("aiida.schedulers")
+assert "slurm_rsc" in schedulers, f"PATCH FAILED: aiida.schedulers = {schedulers}"
+
+calculations = names("aiida.calculations")
+assert "gaussian" in calculations, f"PATCH FAILED: aiida.calculations = {calculations}"
+
+parsers = names("aiida.parsers")
+assert "gaussian.base" in parsers, f"PATCH FAILED: aiida.parsers = {parsers}"
 EOF
 
 %environment

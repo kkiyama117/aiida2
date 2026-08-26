@@ -1,0 +1,49 @@
+# Site configuration for tools/setup_site.py, read INSIDE the container.
+# Copy to config/site.yaml (git-ignored) and fill in the real values.
+# Creating/updating these records is local: nothing here contacts the cluster.
+
+computer:
+  label: sp
+  hostname: camphor.kudpc.kyoto-u.ac.jp
+  scheduler: slurm_rsc
+  transport: core.ssh
+  # {username} is substituted by the SSH transport with ssh.username below.
+  work_dir: /LARGE0/gr10641/aiida/calc_temp/{username}
+  mpirun_command: [srun] # with withmpi=True this yields `srun g16`
+  # Fallback for calculations without `queue:`; stored as a Computer property
+  # (aiida-core has no native default-queue field).
+  default_queue: gr10641a
+  # Transport auth parameters (verdi computer configure level):
+  ssh:
+    username: <your cluster account>
+    # The *container* path from binds.conf:
+    key_filename: /home/aiida/.ssh/id_kudpc
+    # Required despite being a "default": the transport constructor falls
+    # back to False when this is not stored, so known_hosts would never be
+    # read and every connection dies on RejectPolicy.
+    load_system_host_keys: true
+    safe_interval: 60 # seconds between polls; keep the login node idle
+    # Optional core.ssh parameters -- the direct KUDPC setup needs none:
+    # port: 22
+    # proxy_command: "ssh -W %h:%p gateway.example.jp"
+    # use_login_shell: false
+    # look_for_keys: false
+    # allow_agent: false
+    # key_policy: RejectPolicy  # default; known_hosts must carry the host key
+  mail_user: "" # empty = no notification (aiida-slurm-rsc README)
+
+codes:
+  - label: g16
+    executable: g16
+    plugin: gaussian
+    # Used verbatim as the code's prepend_text.  It must: restore the Gaussian
+    # module, PRESERVE the pre-module value of SLURM_CONF (a module can leave
+    # a compute-node-only Slurm configuration behind, which breaks `srun` on
+    # the submitting side), and point GAUSS_SCRDIR at per-job scratch.
+    prepend_text: |
+      SLURM_CONF_SAVED="${SLURM_CONF:-}"
+      . /usr/share/Modules/init/bash
+      module restore gaussian_A -f
+      export SLURM_CONF="${SLURM_CONF_SAVED}"
+      export GAUSS_SCRDIR="${SLURM_TMPDIR:-/tmp}/g16_${SLURM_JOB_ID:-$$}"
+      mkdir -p "${GAUSS_SCRDIR}"

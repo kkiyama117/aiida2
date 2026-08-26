@@ -34,6 +34,13 @@ DATA = Path(os.environ.get("AIIDA_DATA_HOME") or DIR / "data" / "container" / "h
 # pip --user installed into /home/aiida/.local.
 BINDS = [".aiida", ".postgresql", ".rabbitmq", "aiida_run"]
 
+# Extra mounts from config/binds.conf: one `src:dst[:ro]` per line, '#'
+# comments. Credentials stay out of the image and out of git; no file means
+# no extra mounts -- the default session carries no credentials.
+BINDS_CONF = DIR / "config" / "binds.conf"
+# Destinations that would hide aiida-core or the managed profile state.
+PROTECTED_DESTS = ("/home/aiida/.local", "/home/aiida/.aiida")
+
 LOCK = DATA / ".lock"
 LOG = DATA / "container.log"
 
@@ -61,11 +68,48 @@ def apptainer():
     return exe
 
 
+def extra_binds(path=None):
+    """Apptainer mounts from config/binds.conf, or [] if the file is absent.
+
+    A missing source or a destination that shadows /home/aiida/.local or
+    /home/aiida/.aiida is an error, not a silent mount: Apptainer would
+    otherwise create an empty directory at the source, and the shadowed
+    paths hold the installation and the managed state.
+    """
+    if path is None:
+        path = BINDS_CONF
+    if not path.is_file():
+        return []
+    mounts = []
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        src, sep, rest = line.partition(":")
+        dst, _, mode = rest.partition(":")
+        if not sep or not src or not dst or mode not in ("", "ro"):
+            die(f"{path}:{lineno}: expected 'src:dst[:ro]': {line}")
+        src = os.path.expanduser(src)
+        if not os.path.isabs(src):
+            die(f"{path}:{lineno}: source must be absolute: {src}")
+        if not os.path.isabs(dst):
+            die(f"{path}:{lineno}: destination must be absolute: {dst}")
+        if not os.path.exists(src):
+            die(f"{path}:{lineno}: bind source does not exist: {src}")
+        if any(dst == p or dst.startswith(p + "/") for p in PROTECTED_DESTS):
+            die(f"{path}:{lineno}: destination shadows a managed path: {dst}")
+        mounts.append(f"{src}:{dst}" if not mode else f"{src}:{dst}:ro")
+    return mounts
+
+
 def binds():
     args = []
     for name in BINDS:
         (DATA / name).mkdir(parents=True, exist_ok=True)
         args += ["-B", f"{DATA / name}:/home/aiida/{name}"]
+    # Credentials from config/binds.conf ride along for up, shell and attach.
+    for mount in extra_binds():
+        args += ["-B", mount]
     return args
 
 

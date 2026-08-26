@@ -6,3 +6,6 @@ data
 
 __pycache__
 *.py[co]
+config/site.yaml
+config/binds.conf
+submit_test/
