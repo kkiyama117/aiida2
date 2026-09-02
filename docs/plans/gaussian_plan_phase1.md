@@ -139,10 +139,10 @@ Use `run_get_node` so the synchronous dry-run path is explicit.
 Add an in-container integration test that performs the dry run and asserts
 over `_aiidasubmit.sh` and `aiida.inp`:
 
-- present: `#SBATCH --rsc p=1:t=4:c=4:m=4G`;
+- present: `#SBATCH --rsc p=1:t=16:c=16:m=16G`;
 - absent: `--nodes`, `--ntasks*`, `--cpus-per-task`, `--mem`, `--qos`;
 - command line is `'srun' 'g16' < 'aiida.inp' > 'aiida.out'`;
-- `%nprocshared=4`, `%mem=3GB`, and `%chk=aiida.chk`.
+- `%nprocshared=16`, `%mem=15GB`, and `%chk=aiida.chk`.
 
 This is the first exercise of `slurm_rsc` against a real calculation rather
 than a hand-built `JobTemplate`. It requires a stored Computer and Code but

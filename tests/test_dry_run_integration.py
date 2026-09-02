@@ -27,7 +27,7 @@ from tools.submit import build_builder  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 
-# Mirrors examples/h2o_opt.yaml: 4 GB -> %mem=3GB, 4 cores -> %nprocshared=4.
+# Mirrors examples/h2o_opt.yaml: 16 GB -> %mem=15GB, 16 cores -> %nprocshared=16.
 CALC = {
     "code": "dry-run-g16@dry-run-test",
     "structure": str(REPO / "examples" / "h2o.xyz"),
@@ -39,9 +39,9 @@ CALC = {
     "resources": {
         "num_machines": 1,
         "num_mpiprocs_per_machine": 1,
-        "num_cores_per_mpiproc": 4,
+        "num_cores_per_mpiproc": 16,
     },
-    "memory_gb": 4,
+    "memory_gb": 16,
     "max_wallclock_seconds": 1800,
     "queue": "gr41caa",
     "mail": "default",
@@ -106,7 +106,7 @@ def dry_run():
 
 def test_submit_script_has_exact_kudpc_resources():
     script, _ = dry_run()
-    assert "#SBATCH --rsc p=1:t=4:c=4:m=4G" in script, script
+    assert "#SBATCH --rsc p=1:t=16:c=16:m=16G" in script, script
 
 
 def test_submit_script_omits_forbidden_options():
@@ -122,6 +122,6 @@ def test_submit_script_runs_srun_g16_over_stdin():
 
 def test_input_matches_allocated_cores_and_memory():
     _, inp = dry_run()
-    assert "%nprocshared=4" in inp, inp
-    assert "%mem=3GB" in inp, inp  # memory_gb 4 minus the 1 GiB headroom
+    assert "%nprocshared=16" in inp, inp
+    assert "%mem=15GB" in inp, inp  # memory_gb 16 minus the 1 GiB headroom
     assert "%chk=aiida.chk" in inp, inp

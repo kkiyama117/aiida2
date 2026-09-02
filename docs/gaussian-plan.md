@@ -1,12 +1,15 @@
 # Roadmap: from one Gaussian job to reusable AiiDA workflows
 
-> **Note:** the Phase 1 design below predates the review; the authoritative,
-> revised Phase 1 specification is
-> [`docs/plans/gaussian_plan_phase1.md`](plans/gaussian_plan_phase1.md)
-> (aiida-gaussian 2.2.0, `%mem` headroom rule, `srun 'g16' …` quoting,
-> `default_queue`/`safe_interval` placement). Later phases are unaffected.
-Status: **proposed roadmap** — the container and `aiida-slurm-rsc` exist; the
-Gaussian and workflow phases below have not been implemented.
+Status: **Phase 1 complete** (2026-08-26); phases 2-5 remain proposed. The
+container, `aiida-slurm-rsc` and the one-Gaussian-job vertical slice exist;
+no workflow logic has been implemented yet.
+
+> **Phase 1 is specified and recorded in
+> [`docs/plans/gaussian_plan_phase1.md`](plans/gaussian_plan_phase1.md).**
+> That document owns the implementation steps, the acceptance gate and the
+> outcome of the first real submission. What stays in this roadmap is the part
+> the later phases also depend on: the configuration layout, the site and
+> calculation file formats, and the cross-phase risks.
 
 The first deliverable is deliberately small: submit and parse one H2O geometry
 optimisation on KUDPC Camphor. It is a **vertical slice**, not the architecture.
@@ -93,8 +96,9 @@ Neither the host nor the image has Gaussian, and neither has `sbatch`. The only
 place this can run is a real cluster — for us **KUDPC Camphor (`sp`)**, which
 makes this the first real use of the `slurm_rsc` scheduler plugin.
 
-Current state of the profile: computer `localhost` only, no codes, and
-`aiida.calculations` holds nothing but the five core entry points.
+Since Phase 1 the profile carries the `sp` computer and the `g16@sp` code
+alongside `localhost`, and `aiida.calculations` holds the `gaussian` entry
+point in addition to the five core ones.
 
 ## What the old pipeline already established
 
@@ -111,10 +115,11 @@ so all of it belongs in configuration rather than in code:
 
 ## The plugin
 
-`aiida-gaussian` 2.1.0 from PyPI: entry point `gaussian`, parser
+`aiida-gaussian` 2.2.0 from PyPI: entry point `gaussian`, parser
 `gaussian.base`, dependencies `pymatgen`, `cclib<=2.0`, `ase`. It runs the code
 as `g16 < aiida.inp > aiida.out` — **stdin is hardcoded**, `settings.cmdline`
-only adds arguments — and defaults `withmpi` to False.
+only adds arguments — and defaults `withmpi` to False, which is why the
+submitter has to turn it on explicitly (see below).
 
 ## Phase 1 design: one Gaussian vertical slice
 
@@ -123,9 +128,10 @@ Phase 1 proves the smallest useful end-to-end path. It does not add
 
 ### Configuration layout
 
-Two committed example files, two git-ignored real ones. Nothing site-specific
-is committed, so the repository is usable by someone with a different cluster,
-a different account and a different Gaussian module.
+Two committed example files, their two git-ignored real counterparts, and one
+generated directory. Nothing site-specific is committed, so the repository is
+usable by someone with a different cluster, a different account and a different
+Gaussian module.
 
 ```
 config/site.example.yaml     committed — placeholders and comments
@@ -134,6 +140,7 @@ config/binds.example.conf    committed
 config/binds.conf            git-ignored — extra Apptainer bind mounts (ssh key, …)
 examples/h2o_opt.yaml        committed — one calculation, swappable
 examples/h2o.xyz             committed
+submit_test/                 git-ignored — AiiDA's dry-run output directory
 ```
 
 Two files rather than one because they have different readers. `run.py` is
@@ -163,6 +170,13 @@ This cannot be an AiiDA setting: `run.py` has to know the mount before the
 container starts, and the profile it would have to ask lives in a PostgreSQL
 instance inside that container.
 
+Two destinations are refused outright: `/home/aiida/.local`, where aiida-core
+itself is installed, and the managed `/home/aiida/.aiida` state — a bind over
+either replaces the running installation or the profile with host content.
+The parser is covered by a host-side unit test (comments, `~` expansion,
+missing sources, protected destinations) which, like `run.py` itself, stays
+standard-library-only.
+
 ### `config/site.yaml` — the cluster, the code, the mail address
 
 ```yaml
@@ -172,11 +186,12 @@ computer:
   scheduler: slurm_rsc
   transport: core.ssh
   work_dir: /LARGE0/gr10641/aiida/calc_temp/{username}
-  mpirun_command: [srun]          # with withmpi=True this yields `srun g16`
+  mpirun_command: [srun]          # inert unless the submitter sets withmpi=True
   default_queue: gr10641a
   ssh:
     username: <your cluster account>
     key_filename: /home/aiida/.ssh/id_kudpc   # the *container* path from binds.conf
+    load_system_host_keys: true     # without it known_hosts is never read
     safe_interval: 60
   mail_user: ""                   # empty = no notification (see the plugin README)
 
@@ -185,18 +200,35 @@ codes:
     executable: g16
     plugin: gaussian
     prepend_text: |
+      SLURM_CONF_SAVED="${SLURM_CONF:-}"
       . /usr/share/Modules/init/bash
       module restore gaussian_A -f
+      export SLURM_CONF="${SLURM_CONF_SAVED}"
       export GAUSS_SCRDIR="${SLURM_TMPDIR:-/tmp}/g16_${SLURM_JOB_ID:-$$}"
       mkdir -p "${GAUSS_SCRDIR}"
 ```
 
 `mpirun_command: [srun]` passes aiida-core's validator — a command with no
 `{tot_num_mpiprocs}` placeholder is accepted — and reproduces the old
-pipeline's `srun g16`. `safe_interval` is raised from the default 30 s so the
-daemon does not hammer the login node. `mail_user` ends up as a `Computer`
-property, which is what the `slurm_rsc` mail helper already reads; empty means
-nobody is mailed, so no address is ever committed.
+pipeline's `srun g16`. On its own it does nothing: `aiida-gaussian` defaults
+`metadata.options.withmpi` to False, so **the submitter has to set
+`withmpi = True`**, in exactly one place, or the prefix is dropped without a
+word and the job runs off-`srun`.
+
+`load_system_host_keys: true` is needed despite reading like a default. The
+transport falls back to False when the value is not stored, `known_hosts` is
+then never read, and every connection dies on AiiDA's `RejectPolicy`.
+
+The `prepend_text` saves `SLURM_CONF` and restores it after the module
+restore: `module restore gaussian_A` can leave a compute-node-only Slurm
+configuration in the environment, which breaks the very `srun` that is
+supposed to launch the job.
+
+`safe_interval` is raised from the default 30 s so the daemon does not hammer
+the login node; it is a transport auth parameter, not a `Computer` attribute.
+`mail_user` ends up as a `Computer` property, which is what the `slurm_rsc`
+mail helper already reads; empty means nobody is mailed, so no address is ever
+committed.
 
 **Our own `config/site.yaml`** fills in `work_dir:
 /LARGE0/gr10641/aiida/calc_temp/{username}` and the KUDPC account. The
@@ -218,8 +250,8 @@ route_parameters:
 resources:
   num_machines: 1
   num_mpiprocs_per_machine: 1
-  num_cores_per_mpiproc: 4
-memory_gb: 4
+  num_cores_per_mpiproc: 16
+memory_gb: 16
 max_wallclock_seconds: 1800
 queue: gr10641a                 # optional; falls back to site default_queue
 mail: default                   # default | terminal | none | [BEGIN, END]
@@ -232,85 +264,26 @@ structure, route, charge or size. Nothing about H2O is in the code.
 > aiida-gaussian writes `link0_parameters` verbatim, so a mismatch between the
 > Gaussian input and the Slurm allocation is silent. The submitter derives
 > both `--rsc` and the link0 block from the `resources`/`memory_gb` above, so
-> there is one source for the pair.
+> there is one source for the pair. Derived, not copied: `%nprocshared` equals
+> the allocated cores, while `%mem` is the allocated memory *minus a fixed
+> headroom*, because `%mem` covers only Gaussian's dynamic memory. The Phase 1
+> plan carries the rule, its rationale and the unit footgun.
 
 ASE reads the structure; `StructureData` gets `pbc=(False, False, False)` and a
 bounding-box cell, because aiida-gaussian calls `get_pymatgen_molecule()`,
 which refuses a periodic structure.
 
-### Implementation steps
+### Implementation steps and acceptance gate
 
-#### 1. Bake `aiida-gaussian` into the image
-
-Add it to `%post` in `containerfiles/aiida.def` next to `aiida-slurm-rsc`, with
-the same entry-point assertion. A runtime `pip install` is not an option for the
-same reason as before: `/home/aiida/.local` belongs to the read-only image and a
-`--user` install would land in the tmpfs overlay. pymatgen and ase add a few
-hundred MB to the image.
-
-Rebuild: `./run.py down` → `apptainer build --fakeroot --force` → `./run.py up`.
-
-#### 2. Teach `run.py` about `config/binds.conf`
-
-Parse the file if it exists, expand `~`, fail loudly on a missing source rather
-than letting Apptainer create an empty directory, and append to `BINDS`. No
-file, no extra mounts — the default session still carries no credentials.
-
-#### 3. `tools/setup_site.py` — computer and code from `config/site.yaml`
-
-Idempotent: create or update the `Computer`, configure the transport, set
-`mail_user`, then create or update each `InstalledCode`. Run as
-`./run.py attach python3 tools/setup_site.py` (the repository is visible inside
-the container — Apptainer binds the working directory). Finish with
-`verdi computer test <label>`.
-
-#### 4. `tools/submit.py` — a calculation file to a submitted job
-
-`./run.py attach python3 tools/submit.py examples/h2o_opt.yaml [--dry-run]`.
-Builds the `gaussian` builder from the file, derives the link0 block from the
-resources, applies the mail policy through `custom_scheduler_commands`, and
-either submits or dumps the dry-run folder.
-
-#### 5. Dry-run before touching the cluster
-
-`--dry-run`, then read `_aiidasubmit.sh` and `aiida.inp`. Check that:
-
-- `#SBATCH --rsc p=1:t=4:c=4:m=4G` is present;
-- **none** of `--nodes`, `--ntasks*`, `--cpus-per-task`, `--mem`, `--qos` appear;
-- the command line is `srun 'g16' < 'aiida.inp' > 'aiida.out'`;
-- `%nprocshared` and `%mem` match the `--rsc` line.
-
-This is the first check of `slurm_rsc` against a real calculation rather than a
-hand-built `JobTemplate`.
-
-#### 6. Submit, watch, collect
-
-`verdi process list` / `verdi process report`, then `output_parameters`,
-`output_structure` and `energy_ev`. The H2O calculation itself is minutes; the
-queue is the slow part.
-
-#### 7. Document it
-
-A README section covering the two config files, the calculation format, and the
-dry-run-first workflow. Add `config/site.yaml` and `config/binds.conf` to
-`.gitignore`.
-
-### Phase 1 acceptance gate
-
-Phase 1 is complete only when all of these hold:
-
-1. Image build asserts that the `gaussian` calculation and
-   `gaussian.base` parser entry points are installed.
-2. `tools/setup_site.py` is idempotent and `verdi computer test sp` passes.
-3. The dry run has the exact KUDPC resource shape and `srun g16` command listed
-   above, with matching Slurm and Gaussian CPU/memory values.
-4. A real H2O job finishes, parses, and exposes `output_parameters`,
-   `output_structure` and `energy_ev`.
-5. The calculation can be found from a fresh `verdi process list`/query and its
-   input nodes, retrieved output log and provenance can be inspected without
-   relying on an ad-hoc work-unit directory. Generated `aiida.inp` and
-   `_aiidasubmit.sh` are checked in the dry-run folder under item 3; Phase 1
-   does not assume that AiiDA permanently retrieves submission files.
+Both live in
+[`docs/plans/gaussian_plan_phase1.md`](plans/gaussian_plan_phase1.md) and are
+not restated here. In outline: bake `aiida-gaussian` into the image, teach
+`run.py` about `config/binds.conf`, commit the example configuration, create
+the Computer and Code from `config/site.yaml`, turn a calculation file into a
+builder, check the generated `_aiidasubmit.sh` and `aiida.inp` with an
+automated dry-run test, submit for real, and document the result. Everything
+except the real submission — and the three acceptance gates that depend on it
+— is local work that needs no cluster access.
 
 ## Phase 2: native core structure-search workflow
 
@@ -424,12 +397,14 @@ downloadable, and repeating publication is idempotent or detects duplicates.
 
 ## Cross-phase risks and decisions to verify
 
-1. **`g16 < aiida.inp` is unverified on KUDPC.** The old pipeline always passed
-   the input as an argument (`srun g16 file.gjf`). aiida-gaussian cannot do
-   that. If stdin turns out not to work, the fix is a thin wrapper on the
-   cluster that spools stdin to a file and calls `g16` with it, named as the
-   code's executable instead of `g16` — a one-line change in `config/site.yaml`,
-   which is the point of keeping it there. The first submission settles this.
+1. **`g16 < aiida.inp` over stdin — settled in Phase 1.** The old pipeline
+   always passed the input as an argument (`srun g16 file.gjf`) and
+   aiida-gaussian cannot do that, so this was the first thing a real
+   submission had to prove. It ran to normal termination; no wrapper is
+   needed. Had it failed, the fix would have been a thin wrapper on the
+   cluster that spools stdin to a file, named as the code's executable — a
+   one-line change in `config/site.yaml`, which is the point of keeping it
+   there.
 2. **The session has to stay up.** The daemon dies with the current `run.py`
    session, so `./run.py up` must outlive the job. This is acceptable for the
    H2O gate only; the production deployment gate blocks unattended migration.
@@ -464,3 +439,11 @@ downloadable, and repeating publication is idempotent or detects duplicates.
 10. **Credentials and licensed software remain external.** Bind only required
     SSH/licence files; Gaussian stays on the authorised remote system and is
     never baked into or published with the image.
+11. **Multi-node `--rsc` semantics are unvalidated.** The single-node H2O
+    slice proves the shape `slurm_rsc` generates but cannot distinguish
+    competing readings of `p` and `m` — whether `m` is per node or per job,
+    and how `p` interacts with `t`/`c`. Settle it against KUDPC documentation
+    or a deliberate two-node test before the first multi-node calculation.
+    The first consumer would be multi-node Gaussian, which needs
+    `%LindaWorkers` rather than more MPI processes, so the scheduler shape and
+    the link0 block have to be decided together.
